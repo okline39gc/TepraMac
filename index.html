@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <title>TEPRA MACアドレス連続生成印刷（書式チェック付き）</title>
+    <script src="tepraprint.js"></script>
+    <style>
+        body { font-family: sans-serif; margin: 20px; line-height: 1.6; }
+        .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ccc; border-radius: 5px; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; font-weight: bold; margin-bottom: 5px; }
+        input[type="text"], input[type="number"], input[type="file"] { width: 100%; padding: 8px; box-sizing: border-box; }
+        .btn-group { display: table; width: 100%; margin-top: 20px; }
+        .btn-cell { display: table-cell; }
+        button { padding: 12px 20px; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; font-weight: bold; }
+        #printBtn { background-color: #28a745; width: 95%; }
+        #printBtn:hover { background-color: #218838; }
+        #printBtn:disabled { background-color: #6c757d; cursor: not-allowed; }
+        #cancelBtn { background-color: #dc3545; width: 100%; }
+        #cancelBtn:hover { background-color: #c82333; }
+        #cancelBtn:disabled { background-color: #e28790; cursor: not-allowed; opacity: 0.6; }
+        .log { margin-top: 20px; padding: 10px; background-color: #f8f9fa; border: 1px solid #ddd; height: 250px; overflow-y: auto; font-family: monospace; white-space: pre-wrap; }
+        .error-msg { color: #dc3545; font-weight: bold; }
+        .info-msg { color: #0056b3; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>TEPRA MACアドレス連続生成印刷</h2>
+    
+    <div class="form-group">
+        <label for="startMac">先頭MACアドレス (対応書式: XX:XX:XX:XX:XX:XX / XX-XX-XX-XX-XX-XX / XXXXXXXXXXXX)</label>
+        <input type="text" id="startMac" placeholder="00:11:22:33:44:55" value="00:11:22:33:44:55">
+    </div>
+
+    <div class="form-group">
+        <label for="generateCount">生成数 (1〜999)</label>
+        <input type="number" id="generateCount" min="1" max="999" value="5">
+    </div>
+
+    <div class="form-group">
+        <label for="templateFile">テンプレートファイル (.lw1)</label>
+        <input type="file" id="templateFile" accept=".lw1">
+    </div>
+
+    <div class="btn-group">
+        <div class="btn-cell" style="width: 70%;">
+            <button id="printBtn">連番印刷実行</button>
+        </div>
+        <div class="btn-cell" style="width: 30%;">
+            <button id="cancelBtn" disabled>印刷中断</button>
+        </div>
+    </div>
+
+    <h3>ログ出力</h3>
+    <div id="logArea" class="log"></div>
+</div>
+
+<script>
+    let currentPrintJob = null;
+    let generatedMacList = [];
+
+    function log(message, type = 'normal') {
+        const logArea = document.getElementById('logArea');
+        if (type === 'error') {
+            logArea.innerHTML += `<span class="error-msg">${message}</span>\n`;
+        } else if (type === 'info') {
+            logArea.innerHTML += `<span class="info-msg">${message}</span>\n`;
+        } else {
+            logArea.textContent += message + '\n';
+        }
+        logArea.scrollTop = logArea.scrollHeight;
+    }
+
+    // MACアドレスの入力書式を厳密にチェックする関数
+    function validateMacFormat(macStr) {
+        // 1. コロン区切り形式の正規表現 (例: 00:11:22:33:44:55)
+        const colonRegex = /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/;
+        // 2. ハイフン区切り形式の正規表現 (例: 00-11-22-33-44-55)
+        const hyphenRegex = /^([0-9a-fA-F]{2}-){5}[0-9a-fA-F]{2}$/;
+        // 3. 区切り文字なし形式の正規表現 (例: 001122334455)
+        const plainRegex = /^[0-9a-fA-F]{12}$/;
+
+        const trimmedMac = macStr.trim();
+
+        // いずれの正しい書式にも合致しない場合のエラー判定
+        if (!colonRegex.test(trimmedMac) && !hyphenRegex.test(trimmedMac) && !plainRegex.test(trimmedMac)) {
+            // 細かな原因を特定して分かりやすいメッセージを作る
+            const clean = trimmedMac.replace(/[^0-9a-fA-F]/g, '');
+            if (clean.length !== 12) {
+                throw new Error(`【書式エラー】16進数の文字数が足りないか多すぎます（現在: ${clean.length}文字/12文字必要）。`);
+            } else {
+                throw new Error(`【書式エラー】区切り文字の種類が混在しているか、区切る位置が不正です。コロン(:)またはハイフン(-)で2文字ずつ正しく区切ってください。`);
+            }
+        }
+    }
+
+    // MACアドレスのパースと下位3バイトのバリデーション
+    function parseAndValidateMAC(macStr, count) {
+        // 先に書式チェックを実行
+        validateMacFormat(macStr);
+
+        // 記号を排除して純粋な12文字にする
+        const cleanMac = macStr.replace(/[^0-9a-fA-F]/g, '');
+
+        const ouiPart = cleanMac.substring(0, 6).toUpperCase();
+        const nicPartStr = cleanMac.substring(6, 12);
+        const nicValue = parseInt(nicPartStr, 16);
+        
+        log(`【解析成功】上位3バイト: ${ouiPart.match(/.{1,2}/g).join(':')}, 下位3バイト初期値: ${nicPartStr.toUpperCase()}`);
+
+        const MAX_NIC = 0xFFFFFF;
+        if (nicValue + (count - 1) > MAX_NIC) {
+            throw new Error(`【超過エラー】下位3バイトが最終生成数で FF:FF:FF をオーバーするため、処理を中止しました。（最大許容追加数: ${MAX_NIC - nicValue + 1}）`);
+        }
+
+        return { ouiPart, nicValue };
+    }
+
+    // MACアドレス形式に整形する
+    function formatMacAddress(ouiPart, nicValue) {
+        const nicPartStr = nicValue.toString(16).padStart(6, '0').toUpperCase();
+        const fullMac = ouiPart + nicPartStr;
+        return fullMac.match(/.{1,2}/g).join(':');
+    }
+
+    // カウントアップした複数レコードを持つCSV Blobを生成
+    function createMultipleMacCsvBlob(ouiPart, startNicValue, count) {
+        generatedMacList = [];
+        let csvContent = "MAC_ADDRESS\r\n";
+        
+        for (let i = 0; i < count; i++) {
+            const currentNic = startNicValue + i;
+            const macAddress = formatMacAddress(ouiPart, currentNic);
+            generatedMacList.push(macAddress);
+            csvContent += macAddress + "\r\n";
+        }
+
+        const bom = new Uint8Array([0xEF, 0xBB, 0xBF]);
+        const blob = new Blob([bom, csvContent], { type: 'text/csv;charset=utf-8;' });
+        return new File([blob], "mac_serial_data.csv", { type: "text/csv" });
+    }
+
+    document.getElementById('printBtn').addEventListener('click', async () => {
+        document.getElementById('logArea').innerHTML = '';
+        
+        const macInput = document.getElementById('startMac').value;
+        const countInput = parseInt(document.getElementById('generateCount').value, 10);
+        const fileInput = document.getElementById('templateFile');
+        
+        if (isNaN(countInput) || countInput < 1) {
+            alert('生成数は1以上の数値を入力してください。');
+            return;
+        }
+
+        if (fileInput.files.length === 0) {
+            alert('テンプレートファイル（.lw1）を選択してください。');
+            return;
+        }
+
+        const templateFile = fileInput.files[0];
+        
+        document.getElementById('printBtn').disabled = true;
+        document.getElementById('cancelBtn').disabled = false;
+        currentPrintJob = null;
+        
+        try {
+            // 1. 書式チェックおよびキャリーチェックの実行
+            const { ouiPart, nicValue } = parseAndValidateMAC(macInput, countInput);
+            
+            // 2. CSVデータの生成
+            const csvFile = createMultipleMacCsvBlob(ouiPart, nicValue, countInput);
+            log(`${countInput}件のMACアドレス連続データを生成しました。`);
+
+            // 3. プリンタオブジェクトの作成
+            log('プリンタの自動選択を開始します...');
+            const printerResult = await TepraPrint.createPrinter();
+            if (printerResult.errorCode !== TepraPrintError.SUCCESS) {
+                log(`プリンタ作成失敗。エラーコード: ${printerResult.errorCode}`, 'error');
+                finalizeUI();
+                return;
+            }
+            const printer = printerResult.printer;
+            log(`使用プリンタ名: ${printer.printerName}`);
+
+            // 4. 印刷パラメータの取得と設定
+            const paramResult = await printer.createPrintParameter();
+            if (paramResult.errorCode !== TepraPrintError.SUCCESS) {
+                log(`印刷パラメータ取得失敗。エラーコード: ${paramResult.errorCode}`, 'error');
+                finalizeUI();
+                return;
+            }
+            const printParam = paramResult.printParameter;
+            
+            printParam.copies = 1;
+            printParam.skipRecord = true;
+
+            const printFile = {
+                templateFile: templateFile,
+                csvFile: csvFile,
+                imageFile: null
+            };
+
+            // 5. 印刷命令の送信
+            log('テプラへ印刷データを送信中...');
+            const printResult = await printer.doPrint(printParam, printFile);
+            if (printResult.errorCode !== TepraPrintError.SUCCESS) {
+                log(`印刷開始エラー。エラーコード: ${printResult.errorCode}`, 'error');
+                finalizeUI();
+                return;
+            }
+
+            currentPrintJob = printResult.printJob;
+            log(`印刷ジョブが開始されました。Job ID: ${currentPrintJob.jobId}`);
+
+            let lastLoggedPage = 0;
+
+            // 6. ジョブ監視ループ
+            while (true) {
+                const progressResult = await currentPrintJob.progressOfPrint();
+                if (progressResult.errorCode !== TepraPrintError.SUCCESS) {
+                    log(`進捗取得エラー。エラーコード: ${progressResult.errorCode}`, 'error');
+                    break;
+                }
+
+                if (progressResult.jobEnd) {
+                    if (progressResult.canceled) {
+                        log('印刷ジョブはユーザーによって中断されました。', 'error');
+                    } else if (progressResult.statusError !== TepraPrintStatusError.NO_ERROR) {
+                        log(`印刷異常終了。エラーコード: 0x${progressResult.statusError.toString(16)}`, 'error');
+                    } else {
+                        log('すべての連番印刷が正常に完了しました！', 'info');
+                    }
+                    break;
+                } 
+                
+                if (progressResult.pageNumber > 0) {
+                    const currentMac = generatedMacList[progressResult.pageNumber - 1];
+                    if (progressResult.pageNumber !== lastLoggedPage && currentMac) {
+                        log(`【印刷中】ページ: ${progressResult.pageNumber}/${progressResult.totalPageCount} -> 印字データ: [ ${currentMac} ]`, 'info');
+                        lastLoggedPage = progressResult.pageNumber;
+                    }
+                } else {
+                    log(`印刷準備中... 進捗率: ${progressResult.progress}%`);
+                }
+
+                await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+
+        } catch (error) {
+            // 検知したすべてのエラー（書式、文字数、キャリーオーバー）をここで赤字出力します
+            log(error.message, 'error');
+        } finally {
+            finalizeUI();
+        }
+    });
+
+    document.getElementById('cancelBtn').addEventListener('click', async () => {
+        if (!currentPrintJob) {
+            log('アクティブな印刷ジョブがありません。', 'error');
+            return;
+        }
+
+        log('ユーザーによる中断要求を受信しました。テプラにキャンセル命令を送信しています...', 'error');
+        document.getElementById('cancelBtn').disabled = true;
+
+        const cancelResult = await currentPrintJob.cancelPrint();
+        if (cancelResult.errorCode === TepraPrintError.SUCCESS) {
+            log('テプラへ印刷中止命令を送信しました。', 'error');
+        } else {
+            log(`印刷中止命令の送信に失敗しました。エラーコード: ${cancelResult.errorCode}`, 'error');
+            document.getElementById('cancelBtn').disabled = false;
+        }
+    });
+
+    function finalizeUI() {
+        document.getElementById('printBtn').disabled = false;
+        document.getElementById('cancelBtn').disabled = true;
+        currentPrintJob = null;
+    }
+</script>
+
+</body>
+</html>
