@@ -7,6 +7,8 @@
     <style>
         body { font-family: sans-serif; margin: 20px; line-height: 1.6; }
         .container { max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ccc; border-radius: 5px; }
+        .version { font-weight: bold; margin-bottom: 10px; }
+        .template-note { font-size: 0.9em; color: #555; margin-top: 5px; }
         .form-group { margin-bottom: 15px; }
         label { display: block; font-weight: bold; margin-bottom: 5px; }
         input[type="text"], input[type="number"], input[type="file"] { width: 100%; padding: 8px; box-sizing: border-box; }
@@ -27,10 +29,11 @@
 <body>
 
 <div class="container">
+    <div class="version">V1.0  2026/10/12</div>
     <h2>TEPRA MACアドレス連続生成印刷</h2>
     
     <div class="form-group">
-        <label for="startMac">先頭MACアドレス (対応書式: XX:XX:XX:XX:XX:XX / XX-XX-XX-XX-XX-XX / XXXXXXXXXXXX)</label>
+        <label for="startMac">先頭MACアドレス<br>(対応書式: XX:XX:XX:XX:XX:XX / XX-XX-XX-XX-XX-XX / XXXXXXXXXXXX)</label>
         <input type="text" id="startMac" placeholder="00:11:22:33:44:55" value="00:11:22:33:44:55">
     </div>
 
@@ -42,6 +45,7 @@
     <div class="form-group">
         <label for="templateFile">テンプレートファイル (.lw1)</label>
         <input type="file" id="templateFile" accept=".lw1">
+        <div class="template-note">未選択の場合は、同じフォルダーにある「MAC_Address_20261011.lw1」を既定テンプレートとして使用します。</div>
     </div>
 
     <div class="btn-group">
@@ -154,12 +158,32 @@
             return;
         }
 
-        if (fileInput.files.length === 0) {
-            alert('テンプレートファイル（.lw1）を選択してください。');
-            return;
-        }
+        let templateFile;
 
-        const templateFile = fileInput.files[0];
+        if (fileInput.files.length > 0) {
+            // ユーザーがテンプレートを選択した場合は、そのファイルを使用
+            templateFile = fileInput.files[0];
+        } else {
+            // 未選択の場合は、同じフォルダーの既定テンプレートを読み込む
+            try {
+                const response = await fetch('./MAC_Address_20261011.lw1');
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+                const templateBlob = await response.blob();
+                templateFile = new File(
+                    [templateBlob],
+                    'MAC_Address_20261011.lw1',
+                    { type: templateBlob.type || 'application/octet-stream' }
+                );
+                log('既定テンプレート「MAC_Address_20261011.lw1」を使用します。', 'info');
+            } catch (error) {
+                alert('既定テンプレート「MAC_Address_20261011.lw1」を読み込めませんでした。HTMLと同じフォルダーにテンプレートを置き、Webサーバー経由で開くか、テンプレートファイルを選択してください。');
+                log(`既定テンプレートの読み込みに失敗しました: ${error.message}`, 'error');
+                finalizeUI();
+                return;
+            }
+        }
         
         document.getElementById('printBtn').disabled = true;
         document.getElementById('cancelBtn').disabled = false;
@@ -283,3 +307,4 @@
 
 </body>
 </html>
+
